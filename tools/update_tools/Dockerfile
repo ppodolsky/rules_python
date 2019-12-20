@@ -14,7 +14,7 @@ RUN apt-get update -y && apt-get install -y \
     # And wget for the below command.
     wget
 
-RUN wget https://github.com/bazelbuild/bazel/releases/download/0.28.0/bazel-0.28.0-installer-linux-x86_64.sh -O /tmp/bazel-installer.sh
+RUN wget https://github.com/bazelbuild/bazel/releases/download/2.0.0/bazel-2.0.0-installer-linux-x86_64.sh -O /tmp/bazel-installer.sh
 RUN chmod +x /tmp/bazel-installer.sh && /tmp/bazel-installer.sh
 
 # Sanity check the install.
@@ -25,11 +25,6 @@ RUN bazel help info >/dev/null 2>&1
 CMD cp -r /opt/rules_python_source /opt/rules_python && \
     cd /opt/rules_python && \
     bazel clean && \
-    bazel build //packaging:piptool.par //packaging:whltool.par \
-        # This works around a bug in git_repository to give us better debugging
-        # if there's an error.
-        # TODO(brandjon): Remove this once we're using Bazel 0.29, which
-        # contains the fix.
-        --incompatible_string_join_requires_strings=false && \
+    bazel build //packaging:piptool.par //packaging:whltool.par && \
     cp bazel-bin/packaging/piptool.par bazel-bin/packaging/whltool.par /opt/rules_python_source/tools/ && \
     chown --reference=/opt/rules_python_source/update_tools.sh /opt/rules_python_source/tools/piptool.par /opt/rules_python_source/tools/whltool.par

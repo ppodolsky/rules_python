@@ -14,17 +14,50 @@
 """The whl modules defines classes for interacting with Python packages."""
 
 import argparse
-import json
 import os
 import pkg_resources
+import pkginfo
 import re
 import zipfile
+from email.parser import Parser
+
+
+class WheelMetadata(pkg_resources.FileMetadata):
+  """Metadata handler for Wheels
+
+  This provider acts like FileMetadata, but returns
+  """
+
+  def __init__(self, path):
+    self.path = path
+
+  def get_metadata(self, name):
+    if name != 'METADATA':
+      raise KeyError("No metadata except METADATA is available")
+
+    basename = os.path.basename(self.path)
+    parts = basename.split('-')
+    distribution, version = parts[0], parts[1]
+    metadata_path = '{}-{}.dist-info/METADATA'.format(distribution, version)
+
+    with zipfile.ZipFile(self.path) as zf:
+      metadata = zf.read(metadata_path).decode('ascii', 'ignore')
+    return metadata
 
 
 class Wheel(object):
 
   def __init__(self, path):
     self._path = path
+
+  @property
+  def _dist(self):
+    try:
+      return self.__dist
+    except AttributeError:
+      metadata = WheelMetadata(self.path())
+      self.__dist = pkg_resources.DistInfoDistribution.from_filename(self.path(), metadata)
+      return self.__dist
 
   def path(self):
     return self._path
@@ -56,18 +89,8 @@ class Wheel(object):
     return '{}-{}.dist-info'.format(self.distribution(), self.version())
 
   def metadata(self):
-    # Extract the structured data from metadata.json in the WHL's dist-info
-    # directory.
-    with zipfile.ZipFile(self.path(), 'r') as whl:
-      # first check for metadata.json
-      try:
-        with whl.open(self._dist_info() + '/metadata.json') as f:
-          return json.loads(f.read().decode("utf-8"))
-      except KeyError:
-          pass
-      # fall back to METADATA file (https://www.python.org/dev/peps/pep-0427/)
-      with whl.open(self._dist_info() + '/METADATA') as f:
-        return self._parse_metadata(f.read().decode("utf-8"))
+    # Extract the structured data from METADATA
+    return self._parse_with_pkginfo(pkginfo.Wheel(self.path()))
 
   def name(self):
     return self.metadata().get('name')
@@ -82,25 +105,16 @@ class Wheel(object):
     Yields:
       the names of requirements from the metadata.json
     """
-    # TODO(mattmoor): Is there a schema to follow for this?
+    requires = set(self._dist.requires())
+    if extra:
+      requires = set(self._dist.requires(extras=(extra,))) - requires
+
     dependency_set = set()
-
-    run_requires = self.metadata().get('run_requires', [])
-    for requirement in run_requires:
-      if requirement.get('extra') != extra:
-        # Match the requirements for the extra we're looking for.
-        continue
-      marker = requirement.get('environment')
-      if marker and not pkg_resources.evaluate_marker(marker):
-        # The current environment does not match the provided PEP 508 marker,
-        # so ignore this requirement.
-        continue
-      requires = requirement.get('requires', [])
-      for entry in requires:
-        # Strip off any trailing versioning data.
-        parts = re.split('[ ><=()]', entry)
-        dependency_set.add(parts[0])
-
+    for r in requires:
+      name = r.project_name
+      if r.extras:
+        name += "[{0}]".format(",".join(sorted(r.extras)))
+      dependency_set.add(name)
     return dependency_set
 
   def extras(self):
@@ -109,6 +123,32 @@ class Wheel(object):
   def expand(self, directory):
     with zipfile.ZipFile(self.path(), 'r') as whl:
       whl.extractall(directory)
+
+  # _parse_with_pkginfo parses metadata from pkginfo.Wheel object.
+  def _parse_with_pkginfo(self, pkg):
+    metadata = { 'name' : pkg.name }
+    if len(pkg.provides_extras) > 0:
+      metadata['extras'] = sorted(set(pkg.provides_extras))
+    metadata['run_requires'] = []
+    for requirement_str in pkg.requires_dist:
+      requirement = pkg_resources.Requirement.parse(requirement_str)
+
+      r = {}
+      r['requires'] = [requirement.name]
+      r['requires'].extend([requirement.name + "[{0}]".format(extra)
+                            for extra in requirement.extras])
+
+      if requirement.marker:
+        r['environment'] = str(requirement.marker)
+
+        EXTRA_RE = re.compile("extra == ['\"](.*)['\"]")
+        extra_match = EXTRA_RE.search(str(requirement.marker))
+        if extra_match:
+          r['extra'] = extra_match.group(1)
+
+      metadata['run_requires'].append(r)
+
+    return metadata
 
   # _parse_metadata parses METADATA files according to https://www.python.org/dev/peps/pep-0314/
   def _parse_metadata(self, content):
